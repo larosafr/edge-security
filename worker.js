@@ -1,3 +1,4 @@
+// Aplicación de CyberSecurity Scanner para Cloudflare Workers
 import { handleAuth } from './src/handlers/auth.js';
 import { handleDomains } from './src/handlers/domains.js';
 import { handleScanner } from './src/handlers/scanner.js';
@@ -139,6 +140,24 @@ async function handleStaticFiles(path, env) {
   
   if (filePath === 'js/auth.js') {
     return new Response(getAuthJS(), {
+      headers: { 
+        'Content-Type': 'application/javascript',
+        'Cache-Control': 'public, max-age=3600'
+      }
+    });
+  }
+  
+  if (filePath === 'css/dashboard.css') {
+    return new Response(getDashboardCSS(), {
+      headers: { 
+        'Content-Type': 'text/css',
+        'Cache-Control': 'public, max-age=3600'
+      }
+    });
+  }
+  
+  if (filePath === 'js/dashboard.js') {
+    return new Response(getDashboardJS(), {
       headers: { 
         'Content-Type': 'application/javascript',
         'Cache-Control': 'public, max-age=3600'
@@ -611,6 +630,125 @@ class AuthManager {
 // Crear instancia global del gestor de autenticación
 const authManager = new AuthManager();
 window.authManager = authManager;
+`;
+}
+
+// CSS del dashboard
+function getDashboardCSS() {
+  return `
+/* Estilos del Dashboard */
+.dashboard-container {
+  display: flex;
+  min-height: 100vh;
+  background-color: var(--background-color);
+}
+
+.sidebar {
+  width: 250px;
+  background-color: var(--surface-color);
+  border-right: 1px solid var(--border-color);
+  padding: 1rem;
+}
+
+.main-content {
+  flex: 1;
+  padding: 2rem;
+}
+
+.dashboard-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 2rem;
+}
+
+.stats-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+  gap: 1rem;
+  margin-bottom: 2rem;
+}
+
+.stat-card {
+  background-color: var(--surface-color);
+  padding: 1.5rem;
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-sm);
+  border: 1px solid var(--border-color);
+}
+
+.stat-value {
+  font-size: 2rem;
+  font-weight: 700;
+  color: var(--primary-color);
+}
+
+.stat-label {
+  color: var(--text-secondary);
+  font-size: 0.875rem;
+}
+
+.chart-container {
+  background-color: var(--surface-color);
+  padding: 1.5rem;
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-sm);
+  border: 1px solid var(--border-color);
+  margin-bottom: 2rem;
+}
+`;
+}
+
+// JavaScript del dashboard
+function getDashboardJS() {
+  return `
+// Funcionalidad del Dashboard
+class DashboardManager {
+  constructor() {
+    this.init();
+  }
+  
+  init() {
+    this.loadDashboardData();
+    this.setupEventListeners();
+  }
+  
+  async loadDashboardData() {
+    try {
+      const response = await authManager.authenticatedFetch('/api/dashboard/stats');
+      const data = await response.json();
+      
+      if (data.success) {
+        this.updateStats(data.stats);
+        this.updateCharts(data.charts);
+      }
+    } catch (error) {
+      console.error('Error cargando datos del dashboard:', error);
+    }
+  }
+  
+  updateStats(stats) {
+    // Actualizar estadísticas en la interfaz
+    console.log('Actualizando estadísticas:', stats);
+  }
+  
+  updateCharts(charts) {
+    // Actualizar gráficos
+    console.log('Actualizando gráficos:', charts);
+  }
+  
+  setupEventListeners() {
+    // Configurar event listeners
+    console.log('Dashboard inicializado');
+  }
+}
+
+// Inicializar dashboard cuando la página esté lista
+document.addEventListener('DOMContentLoaded', () => {
+  if (window.location.pathname === '/dashboard') {
+    new DashboardManager();
+  }
+});
 `;
 }
 
