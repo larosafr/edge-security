@@ -56,7 +56,7 @@ export default {
       }
       
       if (path.startsWith('/api/dashboard/')) {
-        return await handleDashboard(request, env, corsHeaders);
+        return await handleDashboardAPI(request, env, corsHeaders);
       }
       
       if (path === '/dashboard') {
@@ -65,6 +65,26 @@ export default {
       
       if (path === '/register') {
         return await serveRegisterPage();
+      }
+      
+      if (path === '/domains') {
+        return await serveDomainsPage();
+      }
+      
+      if (path === '/scans') {
+        return await serveScansPage();
+      }
+      
+      if (path === '/vulnerabilities') {
+        return await serveVulnerabilitiesPage();
+      }
+      
+      if (path === '/reports') {
+        return await serveReportsPage();
+      }
+      
+      if (path === '/config') {
+        return await serveConfigPage();
       }
       
       if (path.startsWith('/static/')) {
@@ -959,6 +979,341 @@ async function serveDashboardPage() {
 </html>`;
   
   return new Response(dashboardHTML, {
+    headers: { 'Content-Type': 'text/html' }
+  });
+}
+
+// Función para manejar la API del dashboard
+async function handleDashboardAPI(request, env, corsHeaders) {
+  const url = new URL(request.url);
+  const path = url.pathname;
+  
+  if (path === '/api/dashboard/stats') {
+    // Retornar estadísticas del dashboard
+    return new Response(JSON.stringify({
+      success: true,
+      stats: {
+        domains: 5,
+        totalScans: 23,
+        activeScans: 2,
+        securityScore: 85
+      },
+      charts: {
+        vulnerabilities: {
+          critical: 2,
+          high: 5,
+          medium: 8,
+          low: 12
+        },
+        scanTrend: [
+          { date: '2024-01-01', scans: 5 },
+          { date: '2024-01-02', scans: 8 },
+          { date: '2024-01-03', scans: 12 },
+          { date: '2024-01-04', scans: 15 },
+          { date: '2024-01-05', scans: 23 }
+        ]
+      }
+    }), {
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+    });
+  }
+  
+  return new Response(JSON.stringify({ error: 'Ruta no encontrada' }), { 
+    status: 404,
+    headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+  });
+}
+
+// Páginas adicionales del dashboard
+async function serveDomainsPage() {
+  const domainsHTML = `
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CyberSecurity Scanner - Dominios</title>
+    <link rel="stylesheet" href="/static/css/main.css">
+    <link rel="stylesheet" href="/static/css/dashboard.css">
+</head>
+<body>
+    <div class="dashboard-container">
+        <div class="sidebar">
+            <h2>CyberSecurity Scanner</h2>
+            <nav>
+                <ul>
+                    <li><a href="/dashboard">Overview</a></li>
+                    <li><a href="/domains" class="active">Dominios</a></li>
+                    <li><a href="/scans">Escaneos</a></li>
+                    <li><a href="/vulnerabilities">Vulnerabilidades</a></li>
+                    <li><a href="/reports">Reportes</a></li>
+                    <li><a href="/config">Configuración</a></li>
+                </ul>
+            </nav>
+            <button id="logoutBtn">Cerrar Sesión</button>
+        </div>
+        
+        <div class="main-content">
+            <div class="dashboard-header">
+                <h1>Gestión de Dominios</h1>
+            </div>
+            
+            <div class="chart-container">
+                <h3>Agregar Nuevo Dominio</h3>
+                <form id="addDomainForm">
+                    <input type="text" placeholder="Ingresa el dominio (ej: example.com)" required>
+                    <button type="submit">Agregar Dominio</button>
+                </form>
+            </div>
+            
+            <div class="chart-container">
+                <h3>Dominios Registrados</h3>
+                <p>Aquí se mostrarán los dominios que has agregado para análisis.</p>
+            </div>
+        </div>
+    </div>
+    
+    <script src="/static/js/dashboard.js"></script>
+</body>
+</html>`;
+  
+  return new Response(domainsHTML, {
+    headers: { 'Content-Type': 'text/html' }
+  });
+}
+
+async function serveScansPage() {
+  const scansHTML = `
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CyberSecurity Scanner - Escaneos</title>
+    <link rel="stylesheet" href="/static/css/main.css">
+    <link rel="stylesheet" href="/static/css/dashboard.css">
+</head>
+<body>
+    <div class="dashboard-container">
+        <div class="sidebar">
+            <h2>CyberSecurity Scanner</h2>
+            <nav>
+                <ul>
+                    <li><a href="/dashboard">Overview</a></li>
+                    <li><a href="/domains">Dominios</a></li>
+                    <li><a href="/scans" class="active">Escaneos</a></li>
+                    <li><a href="/vulnerabilities">Vulnerabilidades</a></li>
+                    <li><a href="/reports">Reportes</a></li>
+                    <li><a href="/config">Configuración</a></li>
+                </ul>
+            </nav>
+            <button id="logoutBtn">Cerrar Sesión</button>
+        </div>
+        
+        <div class="main-content">
+            <div class="dashboard-header">
+                <h1>Escaneos de Seguridad</h1>
+            </div>
+            
+            <div class="chart-container">
+                <h3>Iniciar Nuevo Escaneo</h3>
+                <p>Selecciona un dominio y tipo de escaneo para comenzar el análisis de seguridad.</p>
+            </div>
+            
+            <div class="chart-container">
+                <h3>Escaneos Recientes</h3>
+                <p>Historial de escaneos realizados y su estado actual.</p>
+            </div>
+        </div>
+    </div>
+    
+    <script src="/static/js/dashboard.js"></script>
+</body>
+</html>`;
+  
+  return new Response(scansHTML, {
+    headers: { 'Content-Type': 'text/html' }
+  });
+}
+
+async function serveVulnerabilitiesPage() {
+  const vulnerabilitiesHTML = `
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CyberSecurity Scanner - Vulnerabilidades</title>
+    <link rel="stylesheet" href="/static/css/main.css">
+    <link rel="stylesheet" href="/static/css/dashboard.css">
+</head>
+<body>
+    <div class="dashboard-container">
+        <div class="sidebar">
+            <h2>CyberSecurity Scanner</h2>
+            <nav>
+                <ul>
+                    <li><a href="/dashboard">Overview</a></li>
+                    <li><a href="/domains">Dominios</a></li>
+                    <li><a href="/scans">Escaneos</a></li>
+                    <li><a href="/vulnerabilities" class="active">Vulnerabilidades</a></li>
+                    <li><a href="/reports">Reportes</a></li>
+                    <li><a href="/config">Configuración</a></li>
+                </ul>
+            </nav>
+            <button id="logoutBtn">Cerrar Sesión</button>
+        </div>
+        
+        <div class="main-content">
+            <div class="dashboard-header">
+                <h1>Vulnerabilidades Detectadas</h1>
+            </div>
+            
+            <div class="stats-grid">
+                <div class="stat-card">
+                    <div class="stat-value" style="color: #dc2626;">2</div>
+                    <div class="stat-label">Críticas</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-value" style="color: #ea580c;">5</div>
+                    <div class="stat-label">Altas</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-value" style="color: #d97706;">8</div>
+                    <div class="stat-label">Medias</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-value" style="color: #65a30d;">12</div>
+                    <div class="stat-label">Bajas</div>
+                </div>
+            </div>
+            
+            <div class="chart-container">
+                <h3>Detalles de Vulnerabilidades</h3>
+                <p>Lista detallada de todas las vulnerabilidades encontradas con recomendaciones de corrección.</p>
+            </div>
+        </div>
+    </div>
+    
+    <script src="/static/js/dashboard.js"></script>
+</body>
+</html>`;
+  
+  return new Response(vulnerabilitiesHTML, {
+    headers: { 'Content-Type': 'text/html' }
+  });
+}
+
+async function serveReportsPage() {
+  const reportsHTML = `
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CyberSecurity Scanner - Reportes</title>
+    <link rel="stylesheet" href="/static/css/main.css">
+    <link rel="stylesheet" href="/static/css/dashboard.css">
+</head>
+<body>
+    <div class="dashboard-container">
+        <div class="sidebar">
+            <h2>CyberSecurity Scanner</h2>
+            <nav>
+                <ul>
+                    <li><a href="/dashboard">Overview</a></li>
+                    <li><a href="/domains">Dominios</a></li>
+                    <li><a href="/scans">Escaneos</a></li>
+                    <li><a href="/vulnerabilities">Vulnerabilidades</a></li>
+                    <li><a href="/reports" class="active">Reportes</a></li>
+                    <li><a href="/config">Configuración</a></li>
+                </ul>
+            </nav>
+            <button id="logoutBtn">Cerrar Sesión</button>
+        </div>
+        
+        <div class="main-content">
+            <div class="dashboard-header">
+                <h1>Reportes de Seguridad</h1>
+            </div>
+            
+            <div class="chart-container">
+                <h3>Generar Nuevo Reporte</h3>
+                <p>Crea reportes detallados de seguridad para tus dominios.</p>
+                <button>Generar Reporte PDF</button>
+            </div>
+            
+            <div class="chart-container">
+                <h3>Reportes Generados</h3>
+                <p>Historial de reportes creados y disponibles para descarga.</p>
+            </div>
+        </div>
+    </div>
+    
+    <script src="/static/js/dashboard.js"></script>
+</body>
+</html>`;
+  
+  return new Response(reportsHTML, {
+    headers: { 'Content-Type': 'text/html' }
+  });
+}
+
+async function serveConfigPage() {
+  const configHTML = `
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CyberSecurity Scanner - Configuración</title>
+    <link rel="stylesheet" href="/static/css/main.css">
+    <link rel="stylesheet" href="/static/css/dashboard.css">
+</head>
+<body>
+    <div class="dashboard-container">
+        <div class="sidebar">
+            <h2>CyberSecurity Scanner</h2>
+            <nav>
+                <ul>
+                    <li><a href="/dashboard">Overview</a></li>
+                    <li><a href="/domains">Dominios</a></li>
+                    <li><a href="/scans">Escaneos</a></li>
+                    <li><a href="/vulnerabilities">Vulnerabilidades</a></li>
+                    <li><a href="/reports">Reportes</a></li>
+                    <li><a href="/config" class="active">Configuración</a></li>
+                </ul>
+            </nav>
+            <button id="logoutBtn">Cerrar Sesión</button>
+        </div>
+        
+        <div class="main-content">
+            <div class="dashboard-header">
+                <h1>Configuración</h1>
+            </div>
+            
+            <div class="chart-container">
+                <h3>Configuración de Cuenta</h3>
+                <p>Gestiona tu perfil y preferencias de la aplicación.</p>
+            </div>
+            
+            <div class="chart-container">
+                <h3>Configuración de MFA</h3>
+                <p>Configura la autenticación de múltiples factores para mayor seguridad.</p>
+            </div>
+            
+            <div class="chart-container">
+                <h3>Configuración de Escaneos</h3>
+                <p>Personaliza los parámetros de escaneo y notificaciones.</p>
+            </div>
+        </div>
+    </div>
+    
+    <script src="/static/js/dashboard.js"></script>
+</body>
+</html>`;
+  
+  return new Response(configHTML, {
     headers: { 'Content-Type': 'text/html' }
   });
 }
