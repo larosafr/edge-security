@@ -1,30 +1,17 @@
 {
-  "name": "cybersecurity-scanner",
+  "name": "cse-security-scanner",
   "version": "1.0.0",
-  "description": "Aplicación web de ciberseguridad similar a SecurityScorecard",
-  "main": "worker.js",
+  "description": "Un escáner de seguridad de dominios que se ejecuta en Cloudflare Workers.",
+  "private": true,
   "scripts": {
-    "dev": "wrangler dev",
+    "start": "wrangler dev",
     "deploy": "wrangler deploy",
-    "db:migrate": "wrangler d1 migrations apply cybersecurity_db",
-    "db:create": "wrangler d1 create cybersecurity_db"
-  },
-  "keywords": [
-    "cybersecurity",
-    "domain-scanner",
-    "vulnerability-assessment",
-    "cloudflare-workers"
-  ],
-  "author": "Tu Nombre",
-  "license": "MIT",
-  "devDependencies": {
-    "wrangler": "^3.0.0"
+    "db:init": "wrangler d1 execute security-scans --file=./initial.sql"
   },
   "dependencies": {
-    "bcryptjs": "^2.4.3",
-    "jsonwebtoken": "^9.0.0",
-    "otplib": "^12.0.1",
-    "qrcode": "^1.5.3",
-    "itty-router": "^4.0.23"
+    "itty-router": "^4.0.27"
+  },
+  "devDependencies": {
+    "wrangler": "^3.62.0"
   }
 }
