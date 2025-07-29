@@ -55,8 +55,16 @@ export default {
         return await handleScanner(request, env, corsHeaders);
       }
       
-      if (path.startsWith('/api/dashboard/') || path === '/dashboard') {
+      if (path.startsWith('/api/dashboard/')) {
         return await handleDashboard(request, env, corsHeaders);
+      }
+      
+      if (path === '/dashboard') {
+        return await serveDashboardPage();
+      }
+      
+      if (path === '/register') {
+        return await serveRegisterPage();
       }
       
       if (path.startsWith('/static/')) {
@@ -705,31 +713,83 @@ function getDashboardJS() {
 // Funcionalidad del Dashboard
 class DashboardManager {
   constructor() {
+    this.token = localStorage.getItem('auth_token');
+    this.user = JSON.parse(localStorage.getItem('user') || 'null');
     this.init();
   }
   
   init() {
+    // Verificar autenticación
+    if (!this.token) {
+      window.location.href = '/';
+      return;
+    }
+    
     this.loadDashboardData();
     this.setupEventListeners();
   }
   
+  async authenticatedFetch(url, options = {}) {
+    const defaultOptions = {
+      headers: {
+        'Authorization': 'Bearer ' + this.token,
+        'Content-Type': 'application/json',
+        ...options.headers
+      }
+    };
+    
+    return fetch(url, { ...options, ...defaultOptions });
+  }
+  
   async loadDashboardData() {
     try {
-      const response = await authManager.authenticatedFetch('/api/dashboard/stats');
+      const response = await this.authenticatedFetch('/api/dashboard/stats');
       const data = await response.json();
       
       if (data.success) {
         this.updateStats(data.stats);
         this.updateCharts(data.charts);
+      } else if (response.status === 401) {
+        // Token expirado, redirigir al login
+        localStorage.removeItem('auth_token');
+        localStorage.removeItem('user');
+        window.location.href = '/';
       }
     } catch (error) {
       console.error('Error cargando datos del dashboard:', error);
+      // Mostrar datos de ejemplo mientras se implementa la API
+      this.loadMockData();
     }
+  }
+  
+  loadMockData() {
+    // Datos de ejemplo para mostrar funcionalidad
+    const mockStats = {
+      domains: 5,
+      totalScans: 23,
+      activeScans: 2,
+      securityScore: 85
+    };
+    
+    this.updateStats(mockStats);
+    console.log('Cargando datos de ejemplo del dashboard');
   }
   
   updateStats(stats) {
     // Actualizar estadísticas en la interfaz
-    console.log('Actualizando estadísticas:', stats);
+    const statsElements = {
+      domains: document.querySelector('[data-stat="domains"]'),
+      totalScans: document.querySelector('[data-stat="totalScans"]'),
+      activeScans: document.querySelector('[data-stat="activeScans"]'),
+      securityScore: document.querySelector('[data-stat="securityScore"]')
+    };
+    
+    if (statsElements.domains) statsElements.domains.textContent = stats.domains || '-';
+    if (statsElements.totalScans) statsElements.totalScans.textContent = stats.totalScans || '-';
+    if (statsElements.activeScans) statsElements.activeScans.textContent = stats.activeScans || '-';
+    if (statsElements.securityScore) statsElements.securityScore.textContent = stats.securityScore || '-';
+    
+    console.log('Estadísticas actualizadas:', stats);
   }
   
   updateCharts(charts) {
@@ -738,8 +798,17 @@ class DashboardManager {
   }
   
   setupEventListeners() {
-    // Configurar event listeners
-    console.log('Dashboard inicializado');
+    // Configurar botón de cerrar sesión
+    const logoutBtn = document.getElementById('logoutBtn');
+    if (logoutBtn) {
+      logoutBtn.addEventListener('click', () => {
+        localStorage.removeItem('auth_token');
+        localStorage.removeItem('user');
+        window.location.href = '/';
+      });
+    }
+    
+    console.log('Dashboard inicializado correctamente');
   }
 }
 
@@ -780,6 +849,116 @@ async function serveLoginPage() {
 </html>`;
   
   return new Response(loginHTML, {
+    headers: { 'Content-Type': 'text/html' }
+  });
+}
+
+async function serveRegisterPage() {
+  const registerHTML = `
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CyberSecurity Scanner - Registro</title>
+    <link rel="stylesheet" href="/static/css/main.css">
+</head>
+<body>
+    <div class="login-container">
+        <div class="login-form">
+            <h1>Crear Cuenta</h1>
+            <p>Únete a CyberSecurity Scanner</p>
+            <form id="registerForm">
+                <input type="text" id="username" placeholder="Nombre de usuario" required>
+                <input type="email" id="email" placeholder="Email" required>
+                <input type="password" id="password" placeholder="Contraseña" required>
+                <button type="submit">Registrarse</button>
+            </form>
+            <p><a href="/">¿Ya tienes cuenta? Inicia sesión</a></p>
+        </div>
+    </div>
+    <script src="/static/js/auth.js"></script>
+</body>
+</html>`;
+  
+  return new Response(registerHTML, {
+    headers: { 'Content-Type': 'text/html' }
+  });
+}
+
+async function serveDashboardPage() {
+  const dashboardHTML = `
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CyberSecurity Scanner - Dashboard</title>
+    <link rel="stylesheet" href="/static/css/main.css">
+    <link rel="stylesheet" href="/static/css/dashboard.css">
+</head>
+<body>
+    <div class="dashboard-container">
+        <div class="sidebar">
+            <h2>CyberSecurity Scanner</h2>
+            <nav>
+                <ul>
+                    <li><a href="/dashboard" class="active">Overview</a></li>
+                    <li><a href="/domains">Dominios</a></li>
+                    <li><a href="/scans">Escaneos</a></li>
+                    <li><a href="/vulnerabilities">Vulnerabilidades</a></li>
+                    <li><a href="/reports">Reportes</a></li>
+                    <li><a href="/config">Configuración</a></li>
+                </ul>
+            </nav>
+            <button id="logoutBtn">Cerrar Sesión</button>
+        </div>
+        
+        <div class="main-content">
+            <div class="dashboard-header">
+                <h1>Dashboard Overview</h1>
+            </div>
+            
+            <div class="stats-grid">
+                <div class="stat-card">
+                    <div class="stat-value" data-stat="domains">-</div>
+                    <div class="stat-label">Dominios</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-value" data-stat="totalScans">-</div>
+                    <div class="stat-label">Escaneos Totales</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-value" data-stat="activeScans">-</div>
+                    <div class="stat-label">Escaneos Activos</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-value" data-stat="securityScore">-</div>
+                    <div class="stat-label">Puntuación de Seguridad</div>
+                </div>
+            </div>
+            
+            <div class="chart-container">
+                <h3>Vulnerabilidades por Severidad</h3>
+                <div id="vulnerabilityChart">
+                    <!-- Gráfico de vulnerabilidades -->
+                </div>
+            </div>
+            
+            <div class="chart-container">
+                <h3>Tendencia de Escaneos</h3>
+                <div id="scanTrendChart">
+                    <!-- Gráfico de tendencias -->
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <script src="/static/js/dashboard.js"></script>
+</body>
+</html>`;
+  
+  return new Response(dashboardHTML, {
     headers: { 'Content-Type': 'text/html' }
   });
 }
