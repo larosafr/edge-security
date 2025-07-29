@@ -1,1319 +1,813 @@
-// Aplicación de CyberSecurity Scanner para Cloudflare Workers
-import { handleAuth } from './src/handlers/auth.js';
-import { handleDomains } from './src/handlers/domains.js';
-import { handleScanner } from './src/handlers/scanner.js';
-import { handleDashboard } from './src/handlers/dashboard.js';
-import { initDatabase } from './src/utils/database.js';
-import { validateSession } from './src/utils/security.js';
-import { QueueManager } from './src/utils/queue-manager.js';
+import {
+	Router,
+	error,
+	json
+} from 'itty-router';
+import {
+	D1QB
+} from 'd1-qb';
 
-export default {
-  async fetch(request, env, ctx) {
-    try {
-      // Inicializar base de datos
-      await initDatabase(env.DB);
-      
-      const url = new URL(request.url);
-      const path = url.pathname;
-      
-      // Configurar CORS
-      const corsHeaders = {
-        'Access-Control-Allow-Origin': '*',
-        'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
-        'Access-Control-Allow-Headers': 'Content-Type, Authorization',
-      };
-      
-      if (request.method === 'OPTIONS') {
-        return new Response(null, { headers: corsHeaders });
-      }
-      
-      // Rutas públicas (no requieren autenticación)
-      const publicRoutes = ['/login', '/register', '/static/', '/'];
-      const isPublicRoute = publicRoutes.some(route => path.startsWith(route));
-      
-      // Validar sesión para rutas protegidas
-      if (!isPublicRoute) {
-        const sessionValid = await validateSession(request, env.SESSIONS);
-        if (!sessionValid) {
-          return new Response('No autorizado', { 
-            status: 401,
-            headers: corsHeaders 
-          });
-        }
-      }
-      
-      // Enrutamiento
-      if (path.startsWith('/auth/') || path === '/login' || path === '/register') {
-        return await handleAuth(request, env, corsHeaders);
-      }
-      
-      if (path.startsWith('/api/domains/')) {
-        return await handleDomains(request, env, corsHeaders);
-      }
-      
-      if (path.startsWith('/api/scanner/')) {
-        return await handleScanner(request, env, corsHeaders);
-      }
-      
-      if (path.startsWith('/api/dashboard/')) {
-        return await handleDashboardAPI(request, env, corsHeaders);
-      }
-      
-      if (path === '/dashboard') {
-        return await serveDashboardPage();
-      }
-      
-      if (path === '/register') {
-        return await serveRegisterPage();
-      }
-      
-      if (path === '/domains') {
-        return await serveDomainsPage();
-      }
-      
-      if (path === '/scans') {
-        return await serveScansPage();
-      }
-      
-      if (path === '/vulnerabilities') {
-        return await serveVulnerabilitiesPage();
-      }
-      
-      if (path === '/reports') {
-        return await serveReportsPage();
-      }
-      
-      if (path === '/config') {
-        return await serveConfigPage();
-      }
-      
-      if (path.startsWith('/static/')) {
-        return await handleStaticFiles(path, env);
-      }
-      
-      // Página principal
-      if (path === '/') {
-        return await serveLoginPage();
-      }
-      
-      // 404 para rutas no encontradas
-      return new Response('No encontrado', { 
-        status: 404,
-        headers: corsHeaders 
-      });
-      
-    } catch (error) {
-      console.error('Error en worker:', error);
-      return new Response('Error interno del servidor', { 
-        status: 500,
-        headers: {
-          'Access-Control-Allow-Origin': '*',
-          'Content-Type': 'text/plain'
-        }
-      });
-    }
-  },
+// Inicializa enrutadores separados para la API y las páginas/vistas
+const apiRouter = Router({
+	base: '/api'
+});
+const pageRouter = Router();
 
-  // Manejador de colas para procesamiento asíncrono de escaneos
-  async queue(batch, env) {
-    const queueManager = new QueueManager(env);
-    
-    try {
-      console.log(`Procesando batch de ${batch.messages.length} escaneos`);
-      
-      const results = await queueManager.processScanBatch(batch.messages);
-      
-      // Log de resultados para monitoreo
-      const successful = results.filter(r => r.status === 'fulfilled').length;
-      const failed = results.filter(r => r.status === 'rejected').length;
-      
-      console.log(`Batch completado: ${successful} exitosos, ${failed} fallidos`);
-      
-      // Marcar mensajes como procesados
-      batch.messages.forEach(message => {
-        message.ack();
-      });
-      
-    } catch (error) {
-      console.error('Error procesando batch de escaneos:', error);
-      
-      // Marcar mensajes como fallidos para reintento
-      batch.messages.forEach(message => {
-        message.retry();
-      });
-    }
-  }
+// --- LÓGICA DEL MOTOR DE ESCANEO (Mejorada) ---
+async function scanDomain(domain) {
+	const results = {
+		headers: {},
+		recommendations: [],
+		score: 100, // Puntuación inicial
+	};
+	let response;
+	try {
+		// Intenta HTTPS primero, que es el estándar preferido.
+		try {
+			response = await fetch(`https://${domain}`, {
+				redirect: 'manual',
+				headers: {
+					'User-Agent': 'CSE-Security-Scanner/1.0'
+				}
+			});
+		} catch (e) {
+			console.log(`HTTPS failed for ${domain}, trying HTTP. Error: ${e.message}`);
+			results.recommendations.push("El sitio no es accesible a través de HTTPS. Se recomienda encarecidamente configurar SSL/TLS.");
+			results.score -= 25;
+			response = await fetch(`http://${domain}`, {
+				redirect: 'manual',
+				headers: {
+					'User-Agent': 'CSE-Security-Scanner/1.0'
+				}
+			});
+		}
+		results.status_code = response.status;
+		results.url = response.url;
+		const requiredHeaders = {
+			'Content-Security-Policy': {
+				description: 'Protege contra ataques XSS y de inyección de datos.',
+				penalty: 15
+			},
+			'Strict-Transport-Security': {
+				description: 'Asegura que el navegador solo se comunique usando HTTPS.',
+				penalty: 10
+			},
+			'X-Frame-Options': {
+				description: 'Protege contra ataques de clickjacking.',
+				penalty: 5
+			},
+			'X-Content-Type-Options': {
+				description: 'Evita que el navegador interprete archivos con un tipo MIME diferente al declarado.',
+				penalty: 5
+			},
+			'Referrer-Policy': {
+				description: 'Controla cuánta información de referencia se incluye con las solicitudes.',
+				penalty: 2
+			},
+			'Permissions-Policy': {
+				description: 'Controla qué características y APIs del navegador pueden ser usadas en la página.',
+				penalty: 3
+			}
+		};
+		for (const [header, details] of Object.entries(requiredHeaders)) {
+			const lowerCaseHeader = header.toLowerCase();
+			if (response.headers.has(lowerCaseHeader)) {
+				results.headers[header] = {
+					present: true,
+					value: response.headers.get(lowerCaseHeader)
+				};
+			} else {
+				results.headers[header] = {
+					present: false,
+					value: null
+				};
+				results.recommendations.push(`Cabecera de seguridad ausente: '${header}'. ${details.description}`);
+				results.score -= details.penalty;
+			}
+		}
+
+	} catch (e) {
+		console.error(`Failed to scan domain ${domain}: ${e.message}`);
+		results.error = `No se pudo conectar al dominio. Puede que esté offline o bloqueando las solicitudes. Error: ${e.message}`;
+		results.recommendations.push("Verifica que el dominio esté activo y accesible desde internet.");
+		results.score = 0;
+	}
+
+	results.score = Math.max(0, results.score); // Asegura que la puntuación no sea negativa
+	return results;
+}
+
+// --- GESTIÓN DE LA BASE DE DATOS (D1) ---
+const updateDomainStatus = async (db, domain, status, webSocket) => {
+	const qb = new D1QB(db);
+	await qb.update({
+		tableName: 'domains',
+		data: {
+			status: status
+		},
+		where: {
+			conditions: ['name = ?1'],
+			params: [domain]
+		}
+	}).execute();
+	if (webSocket && webSocket.readyState === WebSocket.OPEN) {
+		webSocket.send(JSON.stringify({
+			type: 'statusUpdate',
+			domain,
+			status
+		}));
+	}
 };
 
-async function handleStaticFiles(path, env) {
-  const filePath = path.replace('/static/', '');
-  
-  // Determinar tipo de contenido
-  let contentType = 'text/plain';
-  if (filePath.endsWith('.css')) contentType = 'text/css';
-  if (filePath.endsWith('.js')) contentType = 'application/javascript';
-  if (filePath.endsWith('.png')) contentType = 'image/png';
-  if (filePath.endsWith('.jpg') || filePath.endsWith('.jpeg')) contentType = 'image/jpeg';
-  if (filePath.endsWith('.svg')) contentType = 'image/svg+xml';
-  
-  // Servir archivos estáticos incrustados
-  if (filePath === 'css/main.css') {
-    return new Response(getMainCSS(), {
-      headers: { 
-        'Content-Type': 'text/css',
-        'Cache-Control': 'public, max-age=3600'
-      }
-    });
-  }
-  
-  if (filePath === 'js/auth.js') {
-    return new Response(getAuthJS(), {
-      headers: { 
-        'Content-Type': 'application/javascript',
-        'Cache-Control': 'public, max-age=3600'
-      }
-    });
-  }
-  
-  if (filePath === 'css/dashboard.css') {
-    return new Response(getDashboardCSS(), {
-      headers: { 
-        'Content-Type': 'text/css',
-        'Cache-Control': 'public, max-age=3600'
-      }
-    });
-  }
-  
-  if (filePath === 'js/dashboard.js') {
-    return new Response(getDashboardJS(), {
-      headers: { 
-        'Content-Type': 'application/javascript',
-        'Cache-Control': 'public, max-age=3600'
-      }
-    });
-  }
-  
-  return new Response('Archivo no encontrado', { 
-    status: 404,
-    headers: { 'Content-Type': contentType }
-  });
-}
+const saveScanResults = async (db, domain, results, webSocket) => {
+	const qb = new D1QB(db);
+	const scan_data = JSON.stringify(results);
+	const timestamp = new Date().toISOString();
+	const newStatus = results.error ? 'failed' : 'completed';
 
-// CSS incrustado
-function getMainCSS() {
-  return `
-/* Estilos principales para CyberSecurity Scanner */
-:root {
-  --primary-color: #2563eb;
-  --primary-dark: #1d4ed8;
-  --secondary-color: #64748b;
-  --success-color: #10b981;
-  --warning-color: #f59e0b;
-  --error-color: #ef4444;
-  --critical-color: #dc2626;
-  --background-color: #f8fafc;
-  --surface-color: #ffffff;
-  --text-primary: #1e293b;
-  --text-secondary: #64748b;
-  --border-color: #e2e8f0;
-  --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.05);
-  --shadow-md: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
-  --shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);
-  --radius-sm: 0.375rem;
-  --radius-md: 0.5rem;
-  --radius-lg: 0.75rem;
-}
+	await qb.insert({
+		tableName: 'scans',
+		data: {
+			domain_name: domain,
+			scan_date: timestamp,
+			scan_data: scan_data
+		}
+	}).execute();
 
-* {
-  margin: 0;
-  padding: 0;
-  box-sizing: border-box;
-}
+	await qb.update({
+		tableName: 'domains',
+		data: {
+			last_scanned: timestamp,
+			status: newStatus
+		},
+		where: {
+			conditions: ['name = ?1'],
+			params: [domain]
+		}
+	}).execute();
+	console.log(`Successfully saved scan results for ${domain}`);
+	if (webSocket && webSocket.readyState === WebSocket.OPEN) {
+		webSocket.send(JSON.stringify({
+			type: 'scanCompleted',
+			domain,
+			status: newStatus,
+			last_scanned: timestamp
+		}));
+	}
+};
 
-body {
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-  color: var(--text-primary);
-  line-height: 1.6;
-  min-height: 100vh;
-}
-
-.login-container {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  min-height: 100vh;
-  padding: 1rem;
-}
-
-.login-form {
-  background-color: var(--surface-color);
-  padding: 2rem;
-  border-radius: var(--radius-lg);
-  box-shadow: var(--shadow-lg);
-  width: 100%;
-  max-width: 400px;
-  text-align: center;
-}
-
-.login-form h1 {
-  color: var(--primary-color);
-  margin-bottom: 0.5rem;
-  font-size: 1.875rem;
-  font-weight: 700;
-}
-
-.login-form p {
-  color: var(--text-secondary);
-  margin-bottom: 2rem;
-}
-
-.login-form input {
-  width: 100%;
-  padding: 0.75rem;
-  margin-bottom: 1rem;
-  border: 1px solid var(--border-color);
-  border-radius: var(--radius-md);
-  font-size: 0.875rem;
-  transition: border-color 0.2s ease, box-shadow 0.2s ease;
-}
-
-.login-form input:focus {
-  outline: none;
-  border-color: var(--primary-color);
-  box-shadow: 0 0 0 3px rgb(37 99 235 / 0.1);
-}
-
-.login-form button {
-  width: 100%;
-  padding: 0.75rem;
-  background-color: var(--primary-color);
-  color: white;
-  border: none;
-  border-radius: var(--radius-md);
-  font-size: 0.875rem;
-  font-weight: 500;
-  cursor: pointer;
-  transition: background-color 0.2s ease, transform 0.1s ease;
-  margin-bottom: 1rem;
-}
-
-.login-form button:hover {
-  background-color: var(--primary-dark);
-  transform: translateY(-1px);
-}
-
-.login-form button:active {
-  transform: translateY(0);
-}
-
-.login-form a {
-  color: var(--primary-color);
-  text-decoration: none;
-  font-size: 0.875rem;
-}
-
-.login-form a:hover {
-  text-decoration: underline;
-}
-
-.alert {
-  padding: 0.75rem;
-  border-radius: var(--radius-md);
-  margin-bottom: 1rem;
-  border: 1px solid;
-  font-size: 0.875rem;
-}
-
-.alert-success {
-  background-color: #f0fdf4;
-  border-color: #bbf7d0;
-  color: #166534;
-}
-
-.alert-error {
-  background-color: #fef2f2;
-  border-color: #fecaca;
-  color: #991b1b;
-}
-
-.loading-message {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 0.5rem;
-  padding: 0.75rem;
-  background-color: #eff6ff;
-  border: 1px solid #bfdbfe;
-  border-radius: var(--radius-md);
-  color: #1e40af;
-  margin-bottom: 1rem;
-}
-
-.spinner {
-  display: inline-block;
-  width: 1rem;
-  height: 1rem;
-  border: 2px solid var(--border-color);
-  border-radius: 50%;
-  border-top-color: var(--primary-color);
-  animation: spin 1s ease-in-out infinite;
-}
-
-@keyframes spin {
-  to {
-    transform: rotate(360deg);
-  }
-}
-
-.modal-overlay {
-  position: fixed;
-  top: 0;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  background-color: rgba(0, 0, 0, 0.5);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  z-index: 1000;
-}
-
-.modal {
-  background-color: var(--surface-color);
-  border-radius: var(--radius-lg);
-  box-shadow: var(--shadow-lg);
-  max-width: 500px;
-  width: 90%;
-  max-height: 90vh;
-  overflow-y: auto;
-}
-
-.modal-header {
-  padding: 1.5rem;
-  border-bottom: 1px solid var(--border-color);
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-}
-
-.modal-title {
-  font-size: 1.25rem;
-  font-weight: 600;
-  margin: 0;
-}
-
-.modal-close {
-  background: none;
-  border: none;
-  font-size: 1.5rem;
-  cursor: pointer;
-  color: var(--text-secondary);
-}
-
-.modal-body {
-  padding: 1.5rem;
-}
-
-@media (max-width: 480px) {
-  .login-form {
-    padding: 1.5rem;
-  }
-  
-  .modal {
-    width: 95%;
-  }
-}
-`;
-}
-
-// JavaScript incrustado
-function getAuthJS() {
-  return `
-// Funcionalidad de autenticación
-class AuthManager {
-  constructor() {
-    this.token = localStorage.getItem('auth_token');
-    this.user = JSON.parse(localStorage.getItem('user') || 'null');
-    this.init();
-  }
-  
-  init() {
-    this.setupLoginForm();
-    this.setupRegisterForm();
-    this.setupMFAForm();
-    
-    if (this.token && window.location.pathname === '/') {
-      window.location.href = '/dashboard';
-    }
-  }
-  
-  setupLoginForm() {
-    const loginForm = document.getElementById('loginForm');
-    if (!loginForm) return;
-    
-    loginForm.addEventListener('submit', async (e) => {
-      e.preventDefault();
-      await this.handleLogin(e.target);
-    });
-  }
-  
-  setupRegisterForm() {
-    const registerForm = document.getElementById('registerForm');
-    if (!registerForm) return;
-    
-    registerForm.addEventListener('submit', async (e) => {
-      e.preventDefault();
-      await this.handleRegister(e.target);
-    });
-  }
-  
-  setupMFAForm() {
-    const mfaForm = document.getElementById('mfaForm');
-    if (!mfaForm) return;
-    
-    mfaForm.addEventListener('submit', async (e) => {
-      e.preventDefault();
-      await this.handleMFAVerification(e.target);
-    });
-  }
-  
-  async handleLogin(form) {
-    const email = document.getElementById('email').value;
-    const password = document.getElementById('password').value;
-    const mfaCode = document.getElementById('mfaCode')?.value;
-    
-    if (!email || !password) {
-      this.showError('Por favor, completa todos los campos');
-      return;
-    }
-    
-    this.showLoading('Iniciando sesión...');
-    
-    try {
-      const response = await fetch('/auth/login', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          email,
-          password,
-          mfaCode
-        })
-      });
-      
-      const data = await response.json();
-      
-      if (data.success) {
-        this.token = data.token;
-        this.user = data.user;
-        
-        localStorage.setItem('auth_token', this.token);
-        localStorage.setItem('user', JSON.stringify(this.user));
-        
-        this.showSuccess('¡Inicio de sesión exitoso!');
-        
-        setTimeout(() => {
-          window.location.href = '/dashboard';
-        }, 1000);
-        
-      } else if (data.requiresMFA) {
-        this.showMFAForm();
-      } else {
-        this.showError(data.message || 'Error al iniciar sesión');
-      }
-      
-    } catch (error) {
-      console.error('Error en login:', error);
-      this.showError('Error de conexión. Inténtalo de nuevo.');
-    } finally {
-      this.hideLoading();
-    }
-  }
-  
-  async handleRegister(form) {
-    const username = document.getElementById('username').value;
-    const email = document.getElementById('email').value;
-    const password = document.getElementById('password').value;
-    
-    if (!username || !email || !password) {
-      this.showError('Por favor, completa todos los campos');
-      return;
-    }
-    
-    if (!this.validateEmail(email)) {
-      this.showError('Por favor, ingresa un email válido');
-      return;
-    }
-    
-    if (password.length < 6) {
-      this.showError('La contraseña debe tener al menos 6 caracteres');
-      return;
-    }
-    
-    this.showLoading('Creando cuenta...');
-    
-    try {
-      const response = await fetch('/auth/register', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          username,
-          email,
-          password
-        })
-      });
-      
-      const data = await response.json();
-      
-      if (data.success) {
-        this.showSuccess('¡Cuenta creada exitosamente! Ahora puedes iniciar sesión.');
-        
-        setTimeout(() => {
-          window.location.href = '/';
-        }, 2000);
-        
-      } else {
-        this.showError(data.message || 'Error al crear la cuenta');
-      }
-      
-    } catch (error) {
-      console.error('Error en registro:', error);
-      this.showError('Error de conexión. Inténtalo de nuevo.');
-    } finally {
-      this.hideLoading();
-    }
-  }
-  
-  showMFAForm() {
-    const loginForm = document.querySelector('.login-form');
-    if (!loginForm) return;
-    
-    loginForm.innerHTML = \`
-      <h1>Verificación MFA</h1>
-      <p>Ingresa el código de tu aplicación de autenticación</p>
-      <form id="mfaForm">
-        <input type="text" id="mfaCode" placeholder="Código MFA (6 dígitos)" maxlength="6" required>
-        <button type="submit">Verificar</button>
-      </form>
-      <p><a href="/" onclick="location.reload()">Volver al login</a></p>
-    \`;
-    
-    this.setupMFAForm();
-  }
-  
-  validateEmail(email) {
-    const emailRegex = /^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/;
-    return emailRegex.test(email);
-  }
-  
-  showLoading(message) {
-    this.removeMessages();
-    const container = document.querySelector('.login-form');
-    const loading = document.createElement('div');
-    loading.className = 'loading-message';
-    loading.innerHTML = \`
-      <div class="spinner"></div>
-      <span>\${message}</span>
-    \`;
-    container.appendChild(loading);
-  }
-  
-  hideLoading() {
-    const loading = document.querySelector('.loading-message');
-    if (loading) loading.remove();
-  }
-  
-  showError(message) {
-    this.removeMessages();
-    const container = document.querySelector('.login-form');
-    const error = document.createElement('div');
-    error.className = 'alert alert-error';
-    error.textContent = message;
-    container.appendChild(error);
-    
-    setTimeout(() => error.remove(), 5000);
-  }
-  
-  showSuccess(message) {
-    this.removeMessages();
-    const container = document.querySelector('.login-form');
-    const success = document.createElement('div');
-    success.className = 'alert alert-success';
-    success.textContent = message;
-    container.appendChild(success);
-    
-    setTimeout(() => success.remove(), 5000);
-  }
-  
-  removeMessages() {
-    const messages = document.querySelectorAll('.alert, .loading-message');
-    messages.forEach(msg => msg.remove());
-  }
-}
-
-// Crear instancia global del gestor de autenticación
-const authManager = new AuthManager();
-window.authManager = authManager;
-`;
-}
-
-// CSS del dashboard
-function getDashboardCSS() {
-  return `
-/* Estilos del Dashboard */
-.dashboard-container {
-  display: flex;
-  min-height: 100vh;
-  background-color: var(--background-color);
-}
-
-.sidebar {
-  width: 250px;
-  background-color: var(--surface-color);
-  border-right: 1px solid var(--border-color);
-  padding: 1rem;
-}
-
-.main-content {
-  flex: 1;
-  padding: 2rem;
-}
-
-.dashboard-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 2rem;
-}
-
-.stats-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
-  gap: 1rem;
-  margin-bottom: 2rem;
-}
-
-.stat-card {
-  background-color: var(--surface-color);
-  padding: 1.5rem;
-  border-radius: var(--radius-lg);
-  box-shadow: var(--shadow-sm);
-  border: 1px solid var(--border-color);
-}
-
-.stat-value {
-  font-size: 2rem;
-  font-weight: 700;
-  color: var(--primary-color);
-}
-
-.stat-label {
-  color: var(--text-secondary);
-  font-size: 0.875rem;
-}
-
-.chart-container {
-  background-color: var(--surface-color);
-  padding: 1.5rem;
-  border-radius: var(--radius-lg);
-  box-shadow: var(--shadow-sm);
-  border: 1px solid var(--border-color);
-  margin-bottom: 2rem;
-}
-`;
-}
-
-// JavaScript del dashboard
-function getDashboardJS() {
-  return `
-// Funcionalidad del Dashboard
-class DashboardManager {
-  constructor() {
-    this.token = localStorage.getItem('auth_token');
-    this.user = JSON.parse(localStorage.getItem('user') || 'null');
-    this.init();
-  }
-  
-  init() {
-    // Verificar autenticación
-    if (!this.token) {
-      window.location.href = '/';
-      return;
-    }
-    
-    this.loadDashboardData();
-    this.setupEventListeners();
-  }
-  
-  async authenticatedFetch(url, options = {}) {
-    const defaultOptions = {
-      headers: {
-        'Authorization': 'Bearer ' + this.token,
-        'Content-Type': 'application/json',
-        ...options.headers
-      }
-    };
-    
-    return fetch(url, { ...options, ...defaultOptions });
-  }
-  
-  async loadDashboardData() {
-    try {
-      const response = await this.authenticatedFetch('/api/dashboard/stats');
-      const data = await response.json();
-      
-      if (data.success) {
-        this.updateStats(data.stats);
-        this.updateCharts(data.charts);
-      } else if (response.status === 401) {
-        // Token expirado, redirigir al login
-        localStorage.removeItem('auth_token');
-        localStorage.removeItem('user');
-        window.location.href = '/';
-      }
-    } catch (error) {
-      console.error('Error cargando datos del dashboard:', error);
-      // Mostrar datos de ejemplo mientras se implementa la API
-      this.loadMockData();
-    }
-  }
-  
-  loadMockData() {
-    // Datos de ejemplo para mostrar funcionalidad
-    const mockStats = {
-      domains: 5,
-      totalScans: 23,
-      activeScans: 2,
-      securityScore: 85
-    };
-    
-    this.updateStats(mockStats);
-    console.log('Cargando datos de ejemplo del dashboard');
-  }
-  
-  updateStats(stats) {
-    // Actualizar estadísticas en la interfaz
-    const statsElements = {
-      domains: document.querySelector('[data-stat="domains"]'),
-      totalScans: document.querySelector('[data-stat="totalScans"]'),
-      activeScans: document.querySelector('[data-stat="activeScans"]'),
-      securityScore: document.querySelector('[data-stat="securityScore"]')
-    };
-    
-    if (statsElements.domains) statsElements.domains.textContent = stats.domains || '-';
-    if (statsElements.totalScans) statsElements.totalScans.textContent = stats.totalScans || '-';
-    if (statsElements.activeScans) statsElements.activeScans.textContent = stats.activeScans || '-';
-    if (statsElements.securityScore) statsElements.securityScore.textContent = stats.securityScore || '-';
-    
-    console.log('Estadísticas actualizadas:', stats);
-  }
-  
-  updateCharts(charts) {
-    // Actualizar gráficos
-    console.log('Actualizando gráficos:', charts);
-  }
-  
-  setupEventListeners() {
-    // Configurar botón de cerrar sesión
-    const logoutBtn = document.getElementById('logoutBtn');
-    if (logoutBtn) {
-      logoutBtn.addEventListener('click', () => {
-        localStorage.removeItem('auth_token');
-        localStorage.removeItem('user');
-        window.location.href = '/';
-      });
-    }
-    
-    console.log('Dashboard inicializado correctamente');
-  }
-}
-
-// Inicializar dashboard cuando la página esté lista
-document.addEventListener('DOMContentLoaded', () => {
-  if (window.location.pathname === '/dashboard') {
-    new DashboardManager();
-  }
-});
-`;
-}
-
-async function serveLoginPage() {
-  const loginHTML = `
+// --- PLANTILLAS HTML ---
+const AppShell = (data) => `
 <!DOCTYPE html>
 <html lang="es">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>CyberSecurity Scanner - Login</title>
-    <link rel="stylesheet" href="/static/css/main.css">
+    <title>CSE Security Scanner</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        body { font-family: 'Inter', sans-serif; }
+        .status-dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+        .status-completed { background-color: #22c55e; }
+        .status-queued { background-color: #f59e0b; }
+        .status-scanning { background-color: #3b82f6; }
+        .status-failed { background-color: #ef4444; }
+        .status-pending { background-color: #6b7280; }
+    </style>
 </head>
-<body>
-    <div class="login-container">
-        <div class="login-form">
-            <h1>CyberSecurity Scanner</h1>
-            <p>Análisis de seguridad de dominios</p>
-            <form id="loginForm">
-                <input type="email" id="email" placeholder="Email" required>
-                <input type="password" id="password" placeholder="Contraseña" required>
-                <button type="submit">Iniciar Sesión</button>
-            </form>
-            <p><a href="/register">¿No tienes cuenta? Regístrate</a></p>
-        </div>
-    </div>
-    <script src="/static/js/auth.js"></script>
-</body>
-</html>`;
-  
-  return new Response(loginHTML, {
-    headers: { 'Content-Type': 'text/html' }
-  });
-}
-
-async function serveRegisterPage() {
-  const registerHTML = `
-<!DOCTYPE html>
-<html lang="es">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>CyberSecurity Scanner - Registro</title>
-    <link rel="stylesheet" href="/static/css/main.css">
-</head>
-<body>
-    <div class="login-container">
-        <div class="login-form">
-            <h1>Crear Cuenta</h1>
-            <p>Únete a CyberSecurity Scanner</p>
-            <form id="registerForm">
-                <input type="text" id="username" placeholder="Nombre de usuario" required>
-                <input type="email" id="email" placeholder="Email" required>
-                <input type="password" id="password" placeholder="Contraseña" required>
-                <button type="submit">Registrarse</button>
-            </form>
-            <p><a href="/">¿Ya tienes cuenta? Inicia sesión</a></p>
-        </div>
-    </div>
-    <script src="/static/js/auth.js"></script>
-</body>
-</html>`;
-  
-  return new Response(registerHTML, {
-    headers: { 'Content-Type': 'text/html' }
-  });
-}
-
-async function serveDashboardPage() {
-  const dashboardHTML = `
-<!DOCTYPE html>
-<html lang="es">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>CyberSecurity Scanner - Dashboard</title>
-    <link rel="stylesheet" href="/static/css/main.css">
-    <link rel="stylesheet" href="/static/css/dashboard.css">
-</head>
-<body>
-    <div class="dashboard-container">
-        <div class="sidebar">
-            <h2>CyberSecurity Scanner</h2>
-            <nav>
-                <ul>
-                    <li><a href="/dashboard" class="active">Overview</a></li>
-                    <li><a href="/domains">Dominios</a></li>
-                    <li><a href="/scans">Escaneos</a></li>
-                    <li><a href="/vulnerabilities">Vulnerabilidades</a></li>
-                    <li><a href="/reports">Reportes</a></li>
-                    <li><a href="/config">Configuración</a></li>
-                </ul>
+<body class="bg-gray-100">
+    <div id="app" class="flex h-screen bg-gray-200">
+        <!-- Barra lateral -->
+        <div class="fixed inset-y-0 left-0 transform w-64 bg-gray-900 text-white p-4 space-y-6 flex flex-col">
+            <h1 class="text-2xl font-bold text-white">CSE Scanner</h1>
+            <nav class="flex-grow">
+                <a href="/dashboard" class="nav-link flex items-center py-2.5 px-4 rounded transition duration-200 hover:bg-gray-700">Dashboard</a>
+                <a href="/domains" class="nav-link flex items-center py-2.5 px-4 rounded transition duration-200 hover:bg-gray-700">Dominios</a>
             </nav>
-            <button id="logoutBtn">Cerrar Sesión</button>
-        </div>
-        
-        <div class="main-content">
-            <div class="dashboard-header">
-                <h1>Dashboard Overview</h1>
-            </div>
-            
-            <div class="stats-grid">
-                <div class="stat-card">
-                    <div class="stat-value" data-stat="domains">-</div>
-                    <div class="stat-label">Dominios</div>
-                </div>
-                <div class="stat-card">
-                    <div class="stat-value" data-stat="totalScans">-</div>
-                    <div class="stat-label">Escaneos Totales</div>
-                </div>
-                <div class="stat-card">
-                    <div class="stat-value" data-stat="activeScans">-</div>
-                    <div class="stat-label">Escaneos Activos</div>
-                </div>
-                <div class="stat-card">
-                    <div class="stat-value" data-stat="securityScore">-</div>
-                    <div class="stat-label">Puntuación de Seguridad</div>
-                </div>
-            </div>
-            
-            <div class="chart-container">
-                <h3>Vulnerabilidades por Severidad</h3>
-                <div id="vulnerabilityChart">
-                    <!-- Gráfico de vulnerabilidades -->
-                </div>
-            </div>
-            
-            <div class="chart-container">
-                <h3>Tendencia de Escaneos</h3>
-                <div id="scanTrendChart">
-                    <!-- Gráfico de tendencias -->
-                </div>
-            </div>
-        </div>
-    </div>
-    
-    <script src="/static/js/dashboard.js"></script>
-</body>
-</html>`;
-  
-  return new Response(dashboardHTML, {
-    headers: { 'Content-Type': 'text/html' }
-  });
-}
-
-// Función para manejar la API del dashboard
-async function handleDashboardAPI(request, env, corsHeaders) {
-  const url = new URL(request.url);
-  const path = url.pathname;
-  
-  if (path === '/api/dashboard/stats') {
-    // Retornar estadísticas del dashboard
-    return new Response(JSON.stringify({
-      success: true,
-      stats: {
-        domains: 5,
-        totalScans: 23,
-        activeScans: 2,
-        securityScore: 85
-      },
-      charts: {
-        vulnerabilities: {
-          critical: 2,
-          high: 5,
-          medium: 8,
-          low: 12
-        },
-        scanTrend: [
-          { date: '2024-01-01', scans: 5 },
-          { date: '2024-01-02', scans: 8 },
-          { date: '2024-01-03', scans: 12 },
-          { date: '2024-01-04', scans: 15 },
-          { date: '2024-01-05', scans: 23 }
-        ]
-      }
-    }), {
-      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-    });
-  }
-  
-  return new Response(JSON.stringify({ error: 'Ruta no encontrada' }), { 
-    status: 404,
-    headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-  });
-}
-
-// Páginas adicionales del dashboard
-async function serveDomainsPage() {
-  const domainsHTML = `
-<!DOCTYPE html>
-<html lang="es">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>CyberSecurity Scanner - Dominios</title>
-    <link rel="stylesheet" href="/static/css/main.css">
-    <link rel="stylesheet" href="/static/css/dashboard.css">
-</head>
-<body>
-    <div class="dashboard-container">
-        <div class="sidebar">
-            <h2>CyberSecurity Scanner</h2>
-            <nav>
-                <ul>
-                    <li><a href="/dashboard">Overview</a></li>
-                    <li><a href="/domains" class="active">Dominios</a></li>
-                    <li><a href="/scans">Escaneos</a></li>
-                    <li><a href="/vulnerabilities">Vulnerabilidades</a></li>
-                    <li><a href="/reports">Reportes</a></li>
-                    <li><a href="/config">Configuración</a></li>
-                </ul>
-            </nav>
-            <button id="logoutBtn">Cerrar Sesión</button>
-        </div>
-        
-        <div class="main-content">
-            <div class="dashboard-header">
-                <h1>Gestión de Dominios</h1>
-            </div>
-            
-            <div class="chart-container">
-                <h3>Agregar Nuevo Dominio</h3>
-                <form id="addDomainForm">
-                    <input type="text" placeholder="Ingresa el dominio (ej: example.com)" required>
-                    <button type="submit">Agregar Dominio</button>
+            <div class="mt-auto">
+                 <form action="/logout" method="post">
+                    <button type="submit" class="w-full text-left flex items-center py-2.5 px-4 rounded transition duration-200 hover:bg-red-700">Cerrar Sesión</button>
                 </form>
             </div>
-            
-            <div class="chart-container">
-                <h3>Dominios Registrados</h3>
-                <p>Aquí se mostrarán los dominios que has agregado para análisis.</p>
-            </div>
         </div>
-    </div>
-    
-    <script src="/static/js/dashboard.js"></script>
-</body>
-</html>`;
-  
-  return new Response(domainsHTML, {
-    headers: { 'Content-Type': 'text/html' }
-  });
-}
 
-async function serveScansPage() {
-  const scansHTML = `
-<!DOCTYPE html>
-<html lang="es">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>CyberSecurity Scanner - Escaneos</title>
-    <link rel="stylesheet" href="/static/css/main.css">
-    <link rel="stylesheet" href="/static/css/dashboard.css">
-</head>
-<body>
-    <div class="dashboard-container">
-        <div class="sidebar">
-            <h2>CyberSecurity Scanner</h2>
-            <nav>
-                <ul>
-                    <li><a href="/dashboard">Overview</a></li>
-                    <li><a href="/domains">Dominios</a></li>
-                    <li><a href="/scans" class="active">Escaneos</a></li>
-                    <li><a href="/vulnerabilities">Vulnerabilidades</a></li>
-                    <li><a href="/reports">Reportes</a></li>
-                    <li><a href="/config">Configuración</a></li>
-                </ul>
-            </nav>
-            <button id="logoutBtn">Cerrar Sesión</button>
-        </div>
-        
-        <div class="main-content">
-            <div class="dashboard-header">
-                <h1>Escaneos de Seguridad</h1>
+        <!-- Contenido principal -->
+        <main class="flex-1 p-10 ml-64 overflow-y-auto">
+            <div id="view-content">
+                <!-- El contenido de la vista se renderizará aquí -->
             </div>
-            
-            <div class="chart-container">
-                <h3>Iniciar Nuevo Escaneo</h3>
-                <p>Selecciona un dominio y tipo de escaneo para comenzar el análisis de seguridad.</p>
-            </div>
-            
-            <div class="chart-container">
-                <h3>Escaneos Recientes</h3>
-                <p>Historial de escaneos realizados y su estado actual.</p>
-            </div>
-        </div>
+        </main>
     </div>
     
-    <script src="/static/js/dashboard.js"></script>
-</body>
-</html>`;
-  
-  return new Response(scansHTML, {
-    headers: { 'Content-Type': 'text/html' }
-  });
-}
+    <!-- Modal para resultados de escaneo -->
+    <div id="scan-modal" class="fixed inset-0 bg-black bg-opacity-50 hidden items-center justify-center p-4 z-50">
+        <div class="bg-white rounded-xl shadow-2xl p-6 w-full max-w-2xl max-h-[90vh] overflow-y-auto">
+            <div class="flex justify-between items-center mb-4">
+                <h2 id="modal-title" class="text-xl font-bold">Resultados del Escaneo</h2>
+                <button onclick="App.closeModal()" class="text-gray-500 hover:text-gray-800 text-2xl font-bold">&times;</button>
+            </div>
+            <div id="modal-content" class="text-sm">Cargando...</div>
+        </div>
+    </div>
 
-async function serveVulnerabilitiesPage() {
-  const vulnerabilitiesHTML = `
-<!DOCTYPE html>
-<html lang="es">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>CyberSecurity Scanner - Vulnerabilidades</title>
-    <link rel="stylesheet" href="/static/css/main.css">
-    <link rel="stylesheet" href="/static/css/dashboard.css">
-</head>
-<body>
-    <div class="dashboard-container">
-        <div class="sidebar">
-            <h2>CyberSecurity Scanner</h2>
-            <nav>
-                <ul>
-                    <li><a href="/dashboard">Overview</a></li>
-                    <li><a href="/domains">Dominios</a></li>
-                    <li><a href="/scans">Escaneos</a></li>
-                    <li><a href="/vulnerabilities" class="active">Vulnerabilidades</a></li>
-                    <li><a href="/reports">Reportes</a></li>
-                    <li><a href="/config">Configuración</a></li>
-                </ul>
-            </nav>
-            <button id="logoutBtn">Cerrar Sesión</button>
-        </div>
-        
-        <div class="main-content">
-            <div class="dashboard-header">
-                <h1>Vulnerabilidades Detectadas</h1>
-            </div>
-            
-            <div class="stats-grid">
-                <div class="stat-card">
-                    <div class="stat-value" style="color: #dc2626;">2</div>
-                    <div class="stat-label">Críticas</div>
-                </div>
-                <div class="stat-card">
-                    <div class="stat-value" style="color: #ea580c;">5</div>
-                    <div class="stat-label">Altas</div>
-                </div>
-                <div class="stat-card">
-                    <div class="stat-value" style="color: #d97706;">8</div>
-                    <div class="stat-label">Medias</div>
-                </div>
-                <div class="stat-card">
-                    <div class="stat-value" style="color: #65a30d;">12</div>
-                    <div class="stat-label">Bajas</div>
-                </div>
-            </div>
-            
-            <div class="chart-container">
-                <h3>Detalles de Vulnerabilidades</h3>
-                <p>Lista detallada de todas las vulnerabilidades encontradas con recomendaciones de corrección.</p>
-            </div>
-        </div>
-    </div>
-    
-    <script src="/static/js/dashboard.js"></script>
+    <!-- Datos iniciales para la app -->
+    <script>
+        window.initialData = ${JSON.stringify(data)};
+    </script>
+    <script src="/static/js/app.js"></script>
 </body>
 </html>`;
-  
-  return new Response(vulnerabilitiesHTML, {
-    headers: { 'Content-Type': 'text/html' }
-  });
-}
 
-async function serveReportsPage() {
-  const reportsHTML = `
+const loginPage = (error = '') => `
 <!DOCTYPE html>
-<html lang="es">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>CyberSecurity Scanner - Reportes</title>
-    <link rel="stylesheet" href="/static/css/main.css">
-    <link rel="stylesheet" href="/static/css/dashboard.css">
-</head>
-<body>
-    <div class="dashboard-container">
-        <div class="sidebar">
-            <h2>CyberSecurity Scanner</h2>
-            <nav>
-                <ul>
-                    <li><a href="/dashboard">Overview</a></li>
-                    <li><a href="/domains">Dominios</a></li>
-                    <li><a href="/scans">Escaneos</a></li>
-                    <li><a href="/vulnerabilities">Vulnerabilidades</a></li>
-                    <li><a href="/reports" class="active">Reportes</a></li>
-                    <li><a href="/config">Configuración</a></li>
-                </ul>
-            </nav>
-            <button id="logoutBtn">Cerrar Sesión</button>
-        </div>
-        
-        <div class="main-content">
-            <div class="dashboard-header">
-                <h1>Reportes de Seguridad</h1>
+<html lang="es"><head><meta charset="UTF-8"><title>Login</title><script src="https://cdn.tailwindcss.com"></script></head>
+<body class="bg-gray-100 flex items-center justify-center h-screen">
+    <div class="max-w-md w-full bg-white p-8 rounded-xl shadow-md">
+        <h1 class="text-2xl font-bold text-center mb-6">Acceso al Escáner</h1>
+        <form action="/login" method="post" class="space-y-6">
+            <div>
+                <label for="password" class="block text-sm font-medium text-gray-700">Contraseña</label>
+                <input type="password" name="password" id="password" required class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm placeholder-gray-400 focus:outline-none focus:ring-blue-500 focus:border-blue-500">
             </div>
-            
-            <div class="chart-container">
-                <h3>Generar Nuevo Reporte</h3>
-                <p>Crea reportes detallados de seguridad para tus dominios.</p>
-                <button>Generar Reporte PDF</button>
-            </div>
-            
-            <div class="chart-container">
-                <h3>Reportes Generados</h3>
-                <p>Historial de reportes creados y disponibles para descarga.</p>
-            </div>
-        </div>
+            ${error ? `<p class="text-red-500 text-sm text-center">${error}</p>` : ''}
+            <button type="submit" class="w-full flex justify-center py-2 px-4 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-blue-600 hover:bg-blue-700">Entrar</button>
+        </form>
     </div>
-    
-    <script src="/static/js/dashboard.js"></script>
-</body>
-</html>`;
-  
-  return new Response(reportsHTML, {
-    headers: { 'Content-Type': 'text/html' }
-  });
-}
+</body></html>`;
 
-async function serveConfigPage() {
-  const configHTML = `
-<!DOCTYPE html>
-<html lang="es">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>CyberSecurity Scanner - Configuración</title>
-    <link rel="stylesheet" href="/static/css/main.css">
-    <link rel="stylesheet" href="/static/css/dashboard.css">
-</head>
-<body>
-    <div class="dashboard-container">
-        <div class="sidebar">
-            <h2>CyberSecurity Scanner</h2>
-            <nav>
-                <ul>
-                    <li><a href="/dashboard">Overview</a></li>
-                    <li><a href="/domains">Dominios</a></li>
-                    <li><a href="/scans">Escaneos</a></li>
-                    <li><a href="/vulnerabilities">Vulnerabilidades</a></li>
-                    <li><a href="/reports">Reportes</a></li>
-                    <li><a href="/config" class="active">Configuración</a></li>
-                </ul>
-            </nav>
-            <button id="logoutBtn">Cerrar Sesión</button>
-        </div>
+
+// --- MIDDLEWARE ---
+const authMiddleware = (request, env) => {
+	if (!env.AUTH_TOKEN || !env.PASSWORD) {
+		console.error("AUTH_TOKEN and PASSWORD secrets are not set.");
+		return error(500, "Server configuration error.");
+	}
+	const cookie = request.headers.get('cookie');
+	if (!cookie || !cookie.includes(`auth_token=${env.AUTH_TOKEN}`)) {
+		const url = new URL(request.url);
+		if (url.pathname.startsWith('/api/') || url.pathname.startsWith('/ws')) {
+			return error(401, 'Unauthorized');
+		}
+		return Response.redirect(`${url.origin}/login`, 302);
+	}
+};
+
+// --- RUTAS DE LA API ---
+apiRouter
+	.get('/domains', authMiddleware, async (request, {
+		DB
+	}) => {
+		const qb = new D1QB(DB);
+		const domains = await qb.select({
+			tableName: 'domains',
+			fields: '*',
+			orderBy: 'added_date DESC'
+		}).execute();
+		return json(domains.results);
+	})
+	.post('/domains', authMiddleware, async (request, {
+		DB,
+		SCANNER_QUEUE
+	}) => {
+		try {
+			const {
+				domain
+			} = await request.json();
+			if (!domain || !/^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/.test(domain)) {
+				return error(400, 'Invalid domain name.');
+			}
+			const qb = new D1QB(DB);
+			const inserted = await qb.insert({
+				tableName: 'domains',
+				data: {
+					name: domain,
+					added_date: new Date().toISOString(),
+					status: 'queued'
+				},
+				returning: '*'
+			}).execute();
+			await SCANNER_QUEUE.send({
+				domain
+			});
+			return json(inserted.results[0]);
+		} catch (e) {
+			if (e.message.includes('UNIQUE constraint failed')) {
+				return error(409, 'Domain already exists.');
+			}
+			console.error("Error adding domain:", e);
+			return error(500, 'Internal server error.');
+		}
+	})
+	.post('/scanner', authMiddleware, async (request, {
+		DB,
+		SCANNER_QUEUE
+	}) => {
+		const {
+			domain
+		} = await request.json();
+		if (!domain) return error(400, 'Domain required.');
+		await updateDomainStatus(DB, domain, 'queued', request.WEBSOCKET);
+		await SCANNER_QUEUE.send({
+			domain
+		});
+		return json({
+			message: 'Scan queued.'
+		});
+	})
+	.get('/scans/:domain', authMiddleware, async ({
+		params
+	}, {
+		DB
+	}) => {
+		const qb = new D1QB(DB);
+		const lastScan = await qb.select({
+			tableName: 'scans',
+			fields: '*',
+			where: {
+				conditions: ['domain_name = ?1'],
+				params: [params.domain]
+			},
+			orderBy: 'scan_date DESC',
+			limit: 1
+		}).execute();
+		if (lastScan.results.length > 0) {
+			return new Response(lastScan.results[0].scan_data, {
+				headers: {
+					'Content-Type': 'application/json'
+				}
+			});
+		}
+		return error(404, 'No scans found for this domain.');
+	});
+
+
+// --- RUTAS DE PÁGINAS Y WORKER PRINCIPAL ---
+pageRouter
+	.get('/login', () => new Response(loginPage(), {
+		headers: {
+			'Content-Type': 'text/html'
+		}
+	}))
+	.post('/login', async (request, {
+		PASSWORD,
+		AUTH_TOKEN
+	}) => {
+		const formData = await request.formData();
+		if (formData.get('password') === PASSWORD) {
+			return new Response(null, {
+				status: 302,
+				headers: {
+					'Location': '/dashboard',
+					'Set-Cookie': `auth_token=${AUTH_TOKEN}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=86400`
+				}
+			});
+		}
+		return new Response(loginPage("Contraseña incorrecta."), {
+			status: 401,
+			headers: {
+				'Content-Type': 'text/html'
+			}
+		});
+	})
+	.post('/logout', () => new Response(null, {
+		status: 302,
+		headers: {
+			'Location': '/login',
+			'Set-Cookie': 'auth_token=; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT'
+		}
+	}))
+	.get('/static/js/app.js', () => new Response(FRONTEND_JS, {
+		headers: {
+			'Content-Type': 'application/javascript'
+		}
+	}))
+	.get('/favicon.ico', () => new Response(
+		`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 1.998c-5.524 0-10 4.476-10 10s4.476 10 10 10 10-4.476 10-10-4.476-10-10-10zm-3.293 14.293l-3.293-3.293 1.414-1.414 1.879 1.879 5.657-5.657 1.414 1.414-7.071 7.071z" fill-rule="evenodd" clip-rule="evenodd" fill="currentColor"/></svg>`, {
+			headers: {
+				'Content-Type': 'image/svg+xml'
+			}
+		}
+	))
+	// WebSocket handler
+	.get('/ws', authMiddleware, (request, env) => {
+		const pair = new WebSocketPair();
+		const [client, server] = Object.values(pair);
+		
+		// Adjuntamos el WebSocket al entorno para que el manejador de la cola pueda usarlo.
+		// Esto es una simplificación; en una app real con múltiples usuarios, se necesitaría un Durable Object.
+		env.WEBSOCKET = server;
+		server.accept();
+		
+		server.addEventListener('close', () => {
+			console.log('WebSocket closed');
+			env.WEBSOCKET = null;
+		});
+		server.addEventListener('error', (err) => {
+			console.error('WebSocket error:', err);
+			env.WEBSOCKET = null;
+		});
+
+		return new Response(null, {
+			status: 101,
+			webSocket: client
+		});
+	})
+	// Ruta comodín para la SPA: sirve la aplicación principal para cualquier ruta no reconocida.
+	.get('*', authMiddleware, async (request, {
+		DB
+	}) => {
+		const qb = new D1QB(DB);
+		const domains = await qb.select({
+			tableName: 'domains',
+			fields: '*',
+			orderBy: 'added_date DESC'
+		}).execute();
+		const data = {
+			domains: domains.results || []
+		};
+		return new Response(AppShell(data), {
+			headers: {
+				'Content-Type': 'text/html'
+			}
+		});
+	});
+
+
+export default {
+	async fetch(request, env, ctx) {
+		const url = new URL(request.url);
+		// Dirige las solicitudes /api/* al enrutador de la API
+		if (url.pathname.startsWith('/api/')) {
+			return apiRouter.handle(request, env, ctx).catch(err => error(err.status || 500, err.message));
+		}
+		// Dirige todo lo demás al enrutador de páginas (la SPA)
+		return pageRouter.handle(request, env, ctx).catch(err => error(err.status || 500, err.message));
+	},
+
+	async queue(batch, env, ctx) {
+		console.log(`Processing a batch of ${batch.messages.length} messages.`);
+		for (const msg of batch.messages) {
+			const {
+				domain
+			} = msg.body;
+			if (!domain) {
+				msg.ack();
+				continue;
+			}
+			try {
+				await updateDomainStatus(env.DB, domain, 'scanning', env.WEBSOCKET);
+				const results = await scanDomain(domain);
+				await saveScanResults(env.DB, domain, results, env.WEBSOCKET);
+				msg.ack();
+			} catch (err) {
+				console.error(`Error scanning ${domain}: ${err.message}`);
+				await updateDomainStatus(env.DB, domain, 'failed', env.WEBSOCKET);
+				msg.ack();
+			}
+		}
+	}
+};
+
+// --- CÓDIGO JAVASCRIPT DEL FRONTEND ---
+const FRONTEND_JS = `
+const App = {
+    // Estado global de la aplicación
+    state: {
+        domains: [],
+        currentView: 'dashboard',
+    },
+    // Elementos del DOM cacheados
+    elements: {
+        viewContent: null,
+        navLinks: null,
+        modal: null,
+        modalTitle: null,
+        modalContent: null,
+    },
+    // WebSocket
+    ws: null,
+
+    // Inicialización de la aplicación
+    init() {
+        // Cargar datos iniciales desde el HTML
+        this.state.domains = window.initialData.domains || [];
         
-        <div class="main-content">
-            <div class="dashboard-header">
-                <h1>Configuración</h1>
-            </div>
-            
-            <div class="chart-container">
-                <h3>Configuración de Cuenta</h3>
-                <p>Gestiona tu perfil y preferencias de la aplicación.</p>
-            </div>
-            
-            <div class="chart-container">
-                <h3>Configuración de MFA</h3>
-                <p>Configura la autenticación de múltiples factores para mayor seguridad.</p>
-            </div>
-            
-            <div class="chart-container">
-                <h3>Configuración de Escaneos</h3>
-                <p>Personaliza los parámetros de escaneo y notificaciones.</p>
-            </div>
-        </div>
-    </div>
+        // Cachear elementos del DOM
+        this.elements.viewContent = document.getElementById('view-content');
+        this.elements.navLinks = document.querySelectorAll('.nav-link');
+        this.elements.modal = document.getElementById('scan-modal');
+        this.elements.modalTitle = document.getElementById('modal-title');
+        this.elements.modalContent = document.getElementById('modal-content');
+
+        this.setupRouting();
+        this.connectWebSocket();
+        
+        // Renderizar la vista inicial basada en la URL actual
+        const path = window.location.pathname.replace('/', '') || 'dashboard';
+        this.navigateTo(path, false); // false para no crear una nueva entrada en el historial
+    },
+
+    // Configurar el enrutamiento del lado del cliente
+    setupRouting() {
+        // Escuchar cambios en el historial del navegador (botones atrás/adelante)
+        window.addEventListener('popstate', (e) => {
+            const path = e.state?.path || 'dashboard';
+            this.renderView(path);
+        });
+
+        // Añadir listeners a los enlaces de navegación
+        this.elements.navLinks.forEach(link => {
+            link.addEventListener('click', (e) => {
+                e.preventDefault();
+                const path = new URL(e.currentTarget.href).pathname.substring(1);
+                this.navigateTo(path);
+            });
+        });
+    },
     
-    <script src="/static/js/dashboard.js"></script>
-</body>
-</html>`;
-  
-  return new Response(configHTML, {
-    headers: { 'Content-Type': 'text/html' }
-  });
-}
+    // Navegar a una nueva vista
+    navigateTo(path, addToHistory = true) {
+        if (addToHistory) {
+            // Añadir una nueva entrada al historial del navegador
+            history.pushState({ path }, '', '/' + path);
+        }
+        this.renderView(path);
+    },
+
+    // Renderizar la vista actual en el DOM
+    renderView(path) {
+        this.state.currentView = path;
+        
+        // Resaltar el enlace de navegación activo
+        this.elements.navLinks.forEach(l => {
+            l.classList.toggle('bg-gray-700', l.pathname.endsWith(path));
+        });
+
+        // Renderizar la plantilla correspondiente
+        switch (path) {
+            case 'dashboard':
+                this.elements.viewContent.innerHTML = this.templates.dashboard();
+                this.renderCharts();
+                break;
+            case 'domains':
+                this.elements.viewContent.innerHTML = this.templates.domainsPage(this.state.domains);
+                this.setupDomainPageEventListeners();
+                break;
+            default:
+                this.navigateTo('dashboard'); // Redirigir a dashboard si la ruta no existe
+        }
+    },
+    
+    // Configurar listeners para la página de dominios
+    setupDomainPageEventListeners() {
+        const form = document.getElementById('add-domain-form');
+        form.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const input = document.getElementById('domain-input');
+            const domain = input.value.trim();
+            if (!domain) return;
+
+            const button = e.submitter;
+            button.disabled = true;
+            button.textContent = 'Añadiendo...';
+
+            const messageEl = document.getElementById('form-message');
+            messageEl.textContent = '';
+
+            try {
+                const response = await fetch('/api/domains', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ domain }),
+                });
+                const newDomain = await response.json();
+                if (!response.ok) throw new Error(newDomain.error || 'Error desconocido');
+
+                this.state.domains.unshift(newDomain);
+                this.renderView('domains'); // Re-renderizar para mostrar el nuevo dominio
+                
+            } catch (error) {
+                messageEl.textContent = \`Error: \${error.message}\`;
+                messageEl.className = 'mt-3 text-sm text-red-600';
+                button.disabled = false;
+                button.textContent = 'Añadir';
+            }
+        });
+    },
+    
+    // Conectar WebSocket para actualizaciones en tiempo real
+    connectWebSocket() {
+        const url = new URL(window.location.href);
+        url.protocol = url.protocol.replace('http', 'ws');
+        url.pathname = '/ws';
+        
+        this.ws = new WebSocket(url.toString());
+
+        this.ws.onmessage = (event) => {
+            const data = JSON.parse(event.data);
+            console.log('WS Message:', data);
+            
+            const domainToUpdate = this.state.domains.find(d => d.name === data.domain);
+            if (domainToUpdate) {
+                domainToUpdate.status = data.status;
+                if(data.last_scanned) {
+                    domainToUpdate.last_scanned = data.last_scanned;
+                }
+                // Si estamos en la vista de dominios, la re-renderizamos para mostrar el cambio
+                if (this.state.currentView === 'domains') {
+                    this.renderView('domains');
+                }
+            }
+        };
+
+        this.ws.onclose = () => {
+            console.log('WebSocket disconnected. Reconnecting in 5s...');
+            setTimeout(() => this.connectWebSocket(), 5000);
+        };
+        
+        this.ws.onerror = (err) => {
+            console.error('WebSocket error:', err);
+            this.ws.close();
+        };
+    },
+
+    // Renderizar gráficos en el dashboard
+    renderCharts() {
+        const ctx = document.getElementById('securityScoreChart')?.getContext('2d');
+        if (!ctx) return;
+        new Chart(ctx, {
+            type: 'doughnut',
+            data: {
+                labels: ['Seguro', 'Vulnerable'],
+                datasets: [{
+                    data: [85, 15], // Datos de ejemplo
+                    backgroundColor: ['#22c55e', '#ef4444'],
+                    borderColor: '#fff',
+                    borderWidth: 4,
+                }]
+            },
+            options: { responsive: true, maintainAspectRatio: false, cutout: '70%' }
+        });
+    },
+
+    // Plantillas HTML para las vistas
+    templates: {
+        dashboard() {
+            const completedScans = App.state.domains.filter(d => d.status === 'completed').length;
+            const failedScans = App.state.domains.filter(d => d.status === 'failed').length;
+            return \`
+                <h1 class="text-3xl font-bold mb-6">Dashboard</h1>
+                <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+                    <div class="bg-white p-6 rounded-xl shadow">
+                        <h2 class="text-gray-500 text-sm font-medium">Dominios Totales</h2>
+                        <p class="text-3xl font-bold">\${App.state.domains.length}</p>
+                    </div>
+                    <div class="bg-white p-6 rounded-xl shadow">
+                        <h2 class="text-gray-500 text-sm font-medium">Escaneos Completados</h2>
+                        <p class="text-3xl font-bold text-green-600">\${completedScans}</p>
+                    </div>
+                    <div class="bg-white p-6 rounded-xl shadow">
+                        <h2 class="text-gray-500 text-sm font-medium">Escaneos Fallidos</h2>
+                        <p class="text-3xl font-bold text-red-600">\${failedScans}</p>
+                    </div>
+                </div>
+                <div class="mt-8 bg-white p-6 rounded-xl shadow" style="height: 300px;">
+                    <h2 class="text-xl font-semibold mb-4">Puntuación de Seguridad General</h2>
+                    <canvas id="securityScoreChart"></canvas>
+                </div>
+            \`;
+        },
+        domainsPage(domains) {
+            return \`
+                <h1 class="text-3xl font-bold mb-6">Dominios</h1>
+                <div class="bg-white p-6 rounded-xl shadow-md mb-8">
+                    <h2 class="text-xl font-semibold mb-4">Añadir Dominio</h2>
+                    <form id="add-domain-form" class="flex flex-col sm:flex-row gap-4">
+                        <input type="text" id="domain-input" placeholder="ejemplo.com" class="flex-grow p-3 border rounded-lg" required>
+                        <button type="submit" class="bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-6 rounded-lg transition-colors">Añadir</button>
+                    </form>
+                    <p id="form-message" class="mt-3 text-sm"></p>
+                </div>
+                <div class="bg-white p-6 rounded-xl shadow-md">
+                    <h2 class="text-xl font-semibold mb-4">Dominios Monitorizados</h2>
+                    <div id="domains-list" class="space-y-4">
+                        \${domains.length > 0 ? domains.map(this.domainCard).join('') : '<p class="text-gray-500">No hay dominios todavía. Añade uno para empezar.</p>'}
+                    </div>
+                </div>
+            \`;
+        },
+        domainCard(domain) {
+            const statusText = domain.status ? (domain.status.charAt(0).toUpperCase() + domain.status.slice(1)) : 'Pendiente';
+            const lastScannedText = domain.last_scanned ? new Date(domain.last_scanned).toLocaleString('es-ES') : 'Nunca';
+            return \`
+            <div class="p-4 border rounded-lg flex flex-col sm:flex-row justify-between items-center gap-4">
+                <div class="flex-grow">
+                    <h3 class="font-bold text-lg">\${domain.name}</h3>
+                    <p class="text-sm text-gray-500">
+                        <span class="status-dot status-\${domain.status || 'pending'} inline-block align-middle"></span>
+                        <span class="font-semibold align-middle">\${statusText}</span>
+                        | Último escaneo: \${lastScannedText}
+                    </p>
+                </div>
+                <div class="flex gap-2 flex-shrink-0">
+                     <button onclick="App.viewScan('\${domain.name}')" class="bg-green-500 hover:bg-green-600 text-white font-semibold py-2 px-4 rounded-lg text-sm" \${!domain.last_scanned ? 'disabled' : ''}>Ver</button>
+                     <button onclick="App.rescanDomain(this, '\${domain.name}')" class="bg-gray-200 hover:bg-gray-300 font-semibold py-2 px-4 rounded-lg text-sm">Re-escanear</button>
+                </div>
+            </div>\`;
+        },
+        formatScanResults(results) {
+            if (results.error) {
+                return \`<div class="text-red-500 font-bold">Error de Escaneo: \${results.error}</div>
+                        <div class="mt-2 text-gray-600">\${results.recommendations.join('<br>')}</div>\`;
+            }
+
+            let html = \`<div class="space-y-4">
+                <div class="text-center mb-4">
+                    <h3 class="text-lg font-medium">Puntuación de Seguridad</h3>
+                    <p class="text-5xl font-bold \${results.score > 80 ? 'text-green-600' : results.score > 50 ? 'text-yellow-500' : 'text-red-600'}">\${results.score} / 100</p>
+                </div>
+                <div>
+                    <h4 class="font-bold text-md mb-2">Cabeceras de Seguridad</h4>
+                    <ul class="space-y-2">
+            \`;
+            
+            Object.entries(results.headers).forEach(([header, data]) => {
+                html += \`<li class="font-mono p-2 rounded-md \${data.present ? 'bg-green-50' : 'bg-red-50'}">
+                    <strong class="mr-2">\${header}:</strong> 
+                    \${data.present 
+                        ? '<span class="text-green-700 font-semibold">Presente</span>' 
+                        : '<span class="text-red-700 font-semibold">Ausente</span>'}
+                </li>\`;
+            });
+
+            html += \`</ul></div>\`;
+
+            if (results.recommendations && results.recommendations.length > 0) {
+                html += \`<div>
+                    <h4 class="font-bold text-md mt-4 mb-2">Recomendaciones</h4>
+                    <ul class="list-disc list-inside space-y-2 text-gray-700">
+                \`;
+                results.recommendations.forEach(rec => {
+                    html += \`<li>\${rec}</li>\`;
+                });
+                html += \`</ul></div>\`;
+            }
+
+            html += '</div>';
+            return html;
+        }
+    },
+
+    // Acciones de la aplicación
+    async rescanDomain(button, domain) {
+        button.textContent = 'Encolando...';
+        button.disabled = true;
+        try {
+            await fetch('/api/scanner', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ domain })
+            });
+            // La actualización de la UI se manejará por WebSocket, pero podemos hacer una actualización optimista.
+            const domainState = this.state.domains.find(d => d.name === domain);
+            if(domainState) {
+                domainState.status = 'queued';
+                this.renderView('domains');
+            }
+        } catch (error) {
+            console.error('Error al re-escanear:', error);
+            alert('No se pudo iniciar el escaneo.');
+            button.textContent = 'Re-escanear';
+            button.disabled = false;
+        }
+    },
+
+    async viewScan(domain) {
+        this.elements.modalTitle.textContent = \`Resultados para \${domain}\`;
+        this.elements.modalContent.innerHTML = '<p>Cargando...</p>';
+        this.elements.modal.classList.remove('hidden');
+        this.elements.modal.classList.add('flex');
+
+        try {
+            const response = await fetch(\`/api/scans/\${domain}\`);
+            if (!response.ok) {
+                const err = await response.json();
+                throw new Error(err.error || 'No se pudieron obtener los resultados.');
+            }
+            const results = await response.json();
+            this.elements.modalContent.innerHTML = this.templates.formatScanResults(results);
+        } catch (error) {
+            this.elements.modalContent.innerHTML = \`<p class="text-red-500">Error: \${error.message}</p>\`;
+        }
+    },
+
+    closeModal() {
+        this.elements.modal.classList.add('hidden');
+        this.elements.modal.classList.remove('flex');
+    }
+};
+
+document.addEventListener('DOMContentLoaded', () => App.init());
+`;
