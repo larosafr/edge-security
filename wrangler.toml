@@ -1,0 +1,48 @@
+name = "cse-edge-security"
+main = "worker.js"
+compatibility_date = "2024-01-01"
+account_id = "022656822dfa1501531c571c46dccd59"
+node_compat = true
+
+[vars]
+ENVIRONMENT = "production"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "cse-edge-security-db"
+database_id = "dece2a79-ba3a-4628-9c2b-5b8c181f4de4"
+
+[build]
+command = ""
+
+[[kv_namespaces]]
+binding = "SESSIONS"
+id = "078cf7cbd2f24bb4a825085009b1db6f"
+
+[[kv_namespaces]]
+binding = "CACHE"
+id = "19166737d6a24ad6861a60d042580872"
+
+[[kv_namespaces]]
+binding = "SCAN_QUEUE"
+id = "77b5cd465d15466ba682b538b925f484"
+
+[[kv_namespaces]]
+binding = "SCAN_RESULTS"
+id = "d7b025ad843e497baec6f58485a5a8f4"
+
+# Queue para procesamiento asíncrono de escaneos
+[[queues.producers]]
+queue = "cse-edge-security-scan-queue"
+binding = "SCAN_QUEUE_PRODUCER"
+
+[[queues.consumers]]
+queue = "cse-edge-security-scan-queue"
+max_batch_size = 10
+max_batch_timeout = 5
+max_retries = 3
+dead_letter_queue = "cse-edge-security-scan-dlq"
+
+[[queues.producers]]
+queue = "cse-edge-security-scan-dlq"
+binding = "SCAN_DLQ_PRODUCER"
