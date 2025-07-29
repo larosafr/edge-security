@@ -3,9 +3,6 @@ import {
 	error,
 	json
 } from 'itty-router';
-import {
-	D1QB
-} from 'd1-qb';
 
 // Inicializa enrutadores separados para la API y las páginas/vistas
 const apiRouter = Router({
@@ -97,19 +94,12 @@ async function scanDomain(domain) {
 	return results;
 }
 
-// --- GESTIÓN DE LA BASE DE DATOS (D1) ---
+// --- GESTIÓN DE LA BASE DE DATOS (D1) - AHORA CON API NATIVA ---
 const updateDomainStatus = async (db, domain, status, webSocket) => {
-	const qb = new D1QB(db);
-	await qb.update({
-		tableName: 'domains',
-		data: {
-			status: status
-		},
-		where: {
-			conditions: ['name = ?1'],
-			params: [domain]
-		}
-	}).execute();
+	await db.prepare('UPDATE domains SET status = ?1 WHERE name = ?2')
+		.bind(status, domain)
+		.run();
+
 	if (webSocket && webSocket.readyState === WebSocket.OPEN) {
 		webSocket.send(JSON.stringify({
 			type: 'statusUpdate',
@@ -120,31 +110,18 @@ const updateDomainStatus = async (db, domain, status, webSocket) => {
 };
 
 const saveScanResults = async (db, domain, results, webSocket) => {
-	const qb = new D1QB(db);
 	const scan_data = JSON.stringify(results);
 	const timestamp = new Date().toISOString();
 	const newStatus = results.error ? 'failed' : 'completed';
 
-	await qb.insert({
-		tableName: 'scans',
-		data: {
-			domain_name: domain,
-			scan_date: timestamp,
-			scan_data: scan_data
-		}
-	}).execute();
+	await db.prepare('INSERT INTO scans (domain_name, scan_date, scan_data) VALUES (?1, ?2, ?3)')
+		.bind(domain, timestamp, scan_data)
+		.run();
 
-	await qb.update({
-		tableName: 'domains',
-		data: {
-			last_scanned: timestamp,
-			status: newStatus
-		},
-		where: {
-			conditions: ['name = ?1'],
-			params: [domain]
-		}
-	}).execute();
+	await db.prepare('UPDATE domains SET last_scanned = ?1, status = ?2 WHERE name = ?3')
+		.bind(timestamp, newStatus, domain)
+		.run();
+
 	console.log(`Successfully saved scan results for ${domain}`);
 	if (webSocket && webSocket.readyState === WebSocket.OPEN) {
 		webSocket.send(JSON.stringify({
@@ -156,7 +133,7 @@ const saveScanResults = async (db, domain, results, webSocket) => {
 	}
 };
 
-// --- PLANTILLAS HTML ---
+// --- PLANTILLAS HTML (Sin cambios) ---
 const AppShell = (data) => `
 <!DOCTYPE html>
 <html lang="es">
@@ -259,13 +236,10 @@ apiRouter
 	.get('/domains', authMiddleware, async (request, {
 		DB
 	}) => {
-		const qb = new D1QB(DB);
-		const domains = await qb.select({
-			tableName: 'domains',
-			fields: '*',
-			orderBy: 'added_date DESC'
-		}).execute();
-		return json(domains.results);
+		const {
+			results
+		} = await DB.prepare('SELECT * FROM domains ORDER BY added_date DESC').all();
+		return json(results);
 	})
 	.post('/domains', authMiddleware, async (request, {
 		DB,
@@ -278,20 +252,15 @@ apiRouter
 			if (!domain || !/^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/.test(domain)) {
 				return error(400, 'Invalid domain name.');
 			}
-			const qb = new D1QB(DB);
-			const inserted = await qb.insert({
-				tableName: 'domains',
-				data: {
-					name: domain,
-					added_date: new Date().toISOString(),
-					status: 'queued'
-				},
-				returning: '*'
-			}).execute();
+			const added_date = new Date().toISOString();
+			const inserted = await DB.prepare('INSERT INTO domains (name, added_date, status) VALUES (?1, ?2, ?3) RETURNING *')
+				.bind(domain, added_date, 'queued')
+				.first();
+
 			await SCANNER_QUEUE.send({
 				domain
 			});
-			return json(inserted.results[0]);
+			return json(inserted);
 		} catch (e) {
 			if (e.message.includes('UNIQUE constraint failed')) {
 				return error(409, 'Domain already exists.');
@@ -321,19 +290,12 @@ apiRouter
 	}, {
 		DB
 	}) => {
-		const qb = new D1QB(DB);
-		const lastScan = await qb.select({
-			tableName: 'scans',
-			fields: '*',
-			where: {
-				conditions: ['domain_name = ?1'],
-				params: [params.domain]
-			},
-			orderBy: 'scan_date DESC',
-			limit: 1
-		}).execute();
-		if (lastScan.results.length > 0) {
-			return new Response(lastScan.results[0].scan_data, {
+		const lastScan = await DB.prepare('SELECT * FROM scans WHERE domain_name = ?1 ORDER BY scan_date DESC LIMIT 1')
+			.bind(params.domain)
+			.first();
+
+		if (lastScan) {
+			return new Response(lastScan.scan_data, {
 				headers: {
 					'Content-Type': 'application/json'
 				}
@@ -394,18 +356,12 @@ pageRouter
 	.get('/ws', authMiddleware, (request, env) => {
 		const pair = new WebSocketPair();
 		const [client, server] = Object.values(pair);
-		
-		// Adjuntamos el WebSocket al entorno para que el manejador de la cola pueda usarlo.
-		// Esto es una simplificación; en una app real con múltiples usuarios, se necesitaría un Durable Object.
 		env.WEBSOCKET = server;
 		server.accept();
-		
 		server.addEventListener('close', () => {
-			console.log('WebSocket closed');
 			env.WEBSOCKET = null;
 		});
 		server.addEventListener('error', (err) => {
-			console.error('WebSocket error:', err);
 			env.WEBSOCKET = null;
 		});
 
@@ -418,14 +374,11 @@ pageRouter
 	.get('*', authMiddleware, async (request, {
 		DB
 	}) => {
-		const qb = new D1QB(DB);
-		const domains = await qb.select({
-			tableName: 'domains',
-			fields: '*',
-			orderBy: 'added_date DESC'
-		}).execute();
+		const {
+			results
+		} = await DB.prepare('SELECT * FROM domains ORDER BY added_date DESC').all();
 		const data = {
-			domains: domains.results || []
+			domains: results || []
 		};
 		return new Response(AppShell(data), {
 			headers: {
@@ -438,11 +391,9 @@ pageRouter
 export default {
 	async fetch(request, env, ctx) {
 		const url = new URL(request.url);
-		// Dirige las solicitudes /api/* al enrutador de la API
 		if (url.pathname.startsWith('/api/')) {
 			return apiRouter.handle(request, env, ctx).catch(err => error(err.status || 500, err.message));
 		}
-		// Dirige todo lo demás al enrutador de páginas (la SPA)
 		return pageRouter.handle(request, env, ctx).catch(err => error(err.status || 500, err.message));
 	},
 
@@ -470,7 +421,7 @@ export default {
 	}
 };
 
-// --- CÓDIGO JAVASCRIPT DEL FRONTEND ---
+// --- CÓDIGO JAVASCRIPT DEL FRONTEND (Sin cambios) ---
 const FRONTEND_JS = `
 const App = {
     // Estado global de la aplicación
